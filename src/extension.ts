@@ -1,163 +1,160 @@
 import * as vscode from 'vscode';
 
-// ── Constants ─────────────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────────────
 const DEFAULT_COLORS = ['#c0392b','#2980b9','#27ae60','#8e44ad','#d35400','#16a085','#f39c12','#2c3e50'];
 const KEYBINDINGS: Record<number,string> = {1:'Ctrl+Alt+1',2:'Ctrl+Alt+2',3:'Ctrl+Alt+3',4:'Ctrl+Alt+4',5:'Ctrl+Alt+5'};
-const TERM_KEYS = [
-  'terminal.background','terminal.foreground','terminalCursor.background',
+const TERM_KEYS = ['terminal.background','terminal.foreground','terminalCursor.background',
   'terminalCursor.foreground','terminal.border','terminal.tab.activeBorder',
-  'terminal.tab.activeBorderTop','terminalCommandDecoration.defaultBackground',
-];
+  'terminal.tab.activeBorderTop','terminalCommandDecoration.defaultBackground'];
 const W = vscode.ConfigurationTarget.Workspace;
 
-// ── State ─────────────────────────────────────────────────────────
-const colorCache: Record<string,string>               = {};
-const terminalFolderMap: Map<vscode.Terminal, string> = new Map();
-let statusBarItem:  vscode.StatusBarItem;
-let folderStatusItem: vscode.StatusBarItem | undefined;
-let currentEditorFolder:   string | undefined;
-let currentTerminalFolder: string | undefined;
+// ── State ────────────────────────────────────────────────────────────────────
+const cache: Record<string,string> = {};                    // in-memory color cache
+const tmap  = new Map<vscode.Terminal|number, string>();    // terminal → folder name
+let sbMain: vscode.StatusBarItem;
+let sbFolder: vscode.StatusBarItem | undefined;
+let edFolder: string | undefined;
+let termFolder: string | undefined;
 
-// ── Helpers ───────────────────────────────────────────────────────
-const cfg   = (id: string) => vscode.workspace.getConfiguration(id);
-const whCfg = () => cfg('workspaceHue');
-const wbCfg = () => cfg('workbench');
-const folders = (): readonly vscode.WorkspaceFolder[] => vscode.workspace.workspaceFolders || [];
-const getColor = (name: string | undefined): string | undefined =>
-  name ? (colorCache[name] || whCfg().get<Record<string,string>>('folderColors', {})[name]) : undefined;
+// ── Config shortcuts ─────────────────────────────────────────────────────────
+const whCfg   = () => vscode.workspace.getConfiguration('workspaceHue');
+const wbCfg   = () => vscode.workspace.getConfiguration('workbench');
+const wsFolders = (): readonly vscode.WorkspaceFolder[] => vscode.workspace.workspaceFolders || [];
+const getColor  = (name?: string) => name ? (cache[name] ?? whCfg().get<Record<string,string>>('folderColors',{})[name]) : undefined;
+const wss       = (key: string) => (ctx: vscode.ExtensionContext) => ctx.workspaceState.get<Record<string,unknown>>(key, {});
 
-const darken = (hex: string, pct: number): string => {
-  const n = parseInt(hex.replace('#',''), 16);
-  const ch = (c: number) => Math.max(0, c - Math.round(2.55 * pct));
-  return '#' + ((1<<24) + (ch(n>>16)<<16) + (ch((n>>8)&0xff)<<8) + ch(n&0xff)).toString(16).slice(1);
+// ── Color math ───────────────────────────────────────────────────────────────
+const darken = (hex: string, p: number) => {
+  const n = parseInt(hex.slice(1), 16), d = (c: number) => Math.max(0, c - Math.round(2.55*p));
+  return '#' + ((1<<24)+(d(n>>16)<<16)+(d((n>>8)&0xff)<<8)+d(n&0xff)).toString(16).slice(1);
+};
+const contrast = (hex: string) => {
+  const n = parseInt(hex.slice(1), 16);
+  return (0.299*(n>>16)+0.587*((n>>8)&0xff)+0.114*(n&0xff))/255 > 0.5 ? '#000000' : '#ffffff';
 };
 
-const contrast = (hex: string): string => {
-  const n = parseInt(hex.replace('#',''), 16);
-  return (0.299*(n>>16) + 0.587*((n>>8)&0xff) + 0.114*(n&0xff)) / 255 > 0.5 ? '#000000' : '#ffffff';
-};
-
-// ── Color writing ─────────────────────────────────────────────────
-function writeAllColors(ec: string, tc: string): void {
-  const ed = darken(ec, 20), et = contrast(ec);
-  const tb = darken(tc, 15), tt = contrast(tb), tbr = darken(tc, 5);
+// ── Color application ────────────────────────────────────────────────────────
+function applyColors(ec: string, tc: string) {
+  const [ed,et,tb,tt] = [darken(ec,20),contrast(ec),darken(tc,15),contrast(darken(tc,15))];
   wbCfg().update('colorCustomizations', {
-    'titleBar.activeBackground': ec,  'titleBar.activeForeground': et,  'titleBar.inactiveBackground': ed,
-    'activityBar.background': ec,     'activityBar.foreground': et,     'activityBar.inactiveForeground': et+'99',
-    'statusBar.background': ed,       'statusBar.foreground': et,
-    'terminal.background': tb,        'terminal.foreground': tt,
-    'terminalCursor.background': tb,  'terminalCursor.foreground': tc,
-    'terminal.border': tbr,           'terminal.tab.activeBorder': tc,
-    'terminal.tab.activeBorderTop': tc, 'terminalCommandDecoration.defaultBackground': tc,
+    'titleBar.activeBackground':ec,   'titleBar.activeForeground':et,  'titleBar.inactiveBackground':ed,
+    'activityBar.background':ec,      'activityBar.foreground':et,     'activityBar.inactiveForeground':et+'99',
+    'statusBar.background':ed,        'statusBar.foreground':et,
+    'terminal.background':tb,         'terminal.foreground':tt,
+    'terminalCursor.background':tb,   'terminalCursor.foreground':tc,
+    'terminal.border':darken(tc,5),   'terminal.tab.activeBorder':tc,
+    'terminal.tab.activeBorderTop':tc,'terminalCommandDecoration.defaultBackground':tc,
   }, W);
 }
 
-function clearTerminalColor(): void {
-  const cc = Object.assign({}, wbCfg().get<Record<string,string>>('colorCustomizations', {}));
+const applyEditor   = (name: string) => { const c = getColor(name); if (c) applyColors(c, getColor(termFolder) ?? c); };
+const applyTerminal = (name: string) => { const c = getColor(name); if (c) applyColors(getColor(edFolder) ?? c, c); };
+
+function clearTerminal() {
+  const cc = {...wbCfg().get<Record<string,string>>('colorCustomizations',{})};
   TERM_KEYS.forEach(k => delete cc[k]);
   wbCfg().update('colorCustomizations', cc, W);
 }
 
-// ── Apply colors ──────────────────────────────────────────────────
-const applyEditorColor = (name: string): void => {
-  const ec = getColor(name); if (!ec) return;
-  writeAllColors(ec, getColor(currentTerminalFolder) || ec);
-};
+// ── Status bar ───────────────────────────────────────────────────────────────
+const sbText = (name: string) => `${getColor(name) ? '$(circle-filled)' : '$(folder)'} ${name} $(chevron-down)`;
 
-const applyTerminalColor = (name: string): void => {
-  const tc = getColor(name); if (!tc) return;
-  writeAllColors(getColor(currentEditorFolder) || tc, tc);
-};
-
-// ── Status bar ────────────────────────────────────────────────────
-const sbText = (name: string) =>
-  (getColor(name) ? '$(circle-filled)' : '$(folder)') + ' ' + name + ' $(chevron-down)';
-
-function buildStatusBar(context: vscode.ExtensionContext): void {
-  if (folderStatusItem) folderStatusItem.dispose();
-  const f = folders();
-  folderStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  folderStatusItem.text    = sbText(currentEditorFolder || (f[0] && f[0].name) || '');
-  folderStatusItem.tooltip = 'WorkspaceHue: Click to switch folder';
-  folderStatusItem.command = 'workspaceHue.showFolderPicker';
-  folderStatusItem.show();
-  context.subscriptions.push(folderStatusItem);
+function buildStatusBar(ctx: vscode.ExtensionContext) {
+  sbFolder?.dispose();
+  sbFolder = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  sbFolder.text    = sbText(edFolder ?? (wsFolders()[0]?.name ?? ''));
+  sbFolder.tooltip = 'WorkspaceHue: Click to switch folder';
+  sbFolder.command = 'workspaceHue.showFolderPicker';
+  sbFolder.show();
+  ctx.subscriptions.push(sbFolder);
 }
 
-function updateStatusBar(name: string): void {
-  statusBarItem.text = (getColor(name) ? '●' : '○') + ' ' + name;
-  statusBarItem.show();
-  if (folderStatusItem) folderStatusItem.text = sbText(name);
+function updateStatusBar(name: string) {
+  sbMain.text = `${getColor(name) ? '●' : '○'} ${name}`;
+  sbMain.show();
+  if (sbFolder) sbFolder.text = sbText(name);
 }
 
-// ── Event handlers ────────────────────────────────────────────────
-function handleEditorChange(editor: vscode.TextEditor, context: vscode.ExtensionContext): void {
-  const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
-  if (!folder) return;
-  if (editor.document.uri.scheme === 'file') {
-    const lf = context.workspaceState.get<Record<string,string>>('lastFile', {});
-    lf[folder.name] = editor.document.uri.fsPath;
-    context.workspaceState.update('lastFile', lf);
-  }
-  if (folder.name === currentEditorFolder) return;
-  currentEditorFolder = folder.name;
-  applyEditorColor(folder.name);
+// ── Terminal detection ───────────────────────────────────────────────────────
+function folderByCwd(cwd?: string | vscode.Uri): vscode.WorkspaceFolder | undefined {
+  if (!cwd) return undefined;
+  const s = (typeof cwd === 'string' ? cwd : cwd.fsPath).replace(/\/+$/, '');
+  return [...wsFolders()].sort((a,b) => b.uri.fsPath.length - a.uri.fsPath.length)
+    .find(f => s === f.uri.fsPath || s.startsWith(f.uri.fsPath+'/') || s.startsWith(f.uri.fsPath+'\\'));
+}
+
+const detectFolder = (t: vscode.Terminal) =>
+  folderByCwd((t.creationOptions as vscode.TerminalOptions).cwd)
+  ?? wsFolders().find(f => t.name.toLowerCase() === f.name.toLowerCase());
+
+function storeTerminal(t: vscode.Terminal, name: string, pid?: number) {
+  tmap.set(t, name);
+  if (pid != null) tmap.set(pid, name);
+}
+
+// ── Editor change ────────────────────────────────────────────────────────────
+function onEditorChange(e: vscode.TextEditor, ctx: vscode.ExtensionContext) {
+  const folder = vscode.workspace.getWorkspaceFolder(e.document.uri);
+  if (!folder || e.document.uri.scheme !== 'file') return;
+  const lf = ctx.workspaceState.get<Record<string,string>>('lastFile', {});
+  ctx.workspaceState.update('lastFile', {...lf, [folder.name]: e.document.uri.fsPath});
+  if (folder.name === edFolder) return;
+  edFolder = folder.name;
+  applyEditor(folder.name);
   updateStatusBar(folder.name);
 }
 
-function detectFolder(terminal: vscode.Terminal): vscode.WorkspaceFolder | undefined {
-  const fs = folders(); if (!fs.length) return undefined;
-  const byLength = <T>(arr: T[], key: (x: T) => number) => [...arr].sort((a,b) => key(b) - key(a));
+// ── Terminal change ──────────────────────────────────────────────────────────
+function onTerminalChange(t: vscode.Terminal, ctx: vscode.ExtensionContext) {
+  t.processId.then(pid => {
+    let name = (tmap.get(t) ?? (pid != null ? tmap.get(pid) : undefined)) as string | undefined;
 
-  // 1. CWD — longest matching path wins
-  const cwd = (terminal.creationOptions as vscode.TerminalOptions).cwd;
-  if (cwd) {
-    const s = (typeof cwd === 'string' ? cwd : cwd.fsPath).replace(/\/+$/, '');
-    const match = byLength([...fs], f => f.uri.fsPath.length)
-      .find(f => s === f.uri.fsPath || s.startsWith(f.uri.fsPath+'/') || s.startsWith(f.uri.fsPath+'\\'));
-    if (match) return match;
-  }
+    if (!name) {
+      const f = detectFolder(t);
+      if (f) { name = f.name; storeTerminal(t, name, pid); }
+    }
 
-  // 2. Exact terminal name match
-  const tn = terminal.name.toLowerCase();
-  const exact = fs.find(f => tn === f.name.toLowerCase());
-  if (exact) return exact;
+    if (!name && pid != null) {
+      name = ctx.workspaceState.get<Record<number,string>>('terminalPidMap', {})[pid];
+      if (name) storeTerminal(t, name, pid);
+    }
 
-  // 3. Word-boundary match — longer names first to avoid "Project" matching "ProjectA"
-  const wb = /[\s\-_\/\\]/;
-  return byLength([...fs], f => f.name.length).find(f => {
-    const fn = f.name.toLowerCase(), i = tn.indexOf(fn);
-    if (i === -1) return false;
-    return (i === 0 || wb.test(tn[i-1])) && (i+fn.length >= tn.length || wb.test(tn[i+fn.length]));
+    if (!name) {
+      if (!wsFolders().some(f => getColor(f.name))) return;
+      vscode.window.showQuickPick(wsFolders().map(f => ({ label: f.name })),
+        { placeHolder: 'WorkspaceHue: Which folder does this terminal belong to?' }
+      ).then(sel => {
+        if (!sel) return;
+        storeTerminal(t, sel.label, pid);
+        if (pid != null) {
+          const m = ctx.workspaceState.get<Record<number,string>>('terminalPidMap', {});
+          ctx.workspaceState.update('terminalPidMap', {...m, [pid]: sel.label});
+        }
+        termFolder = sel.label;
+        applyTerminal(sel.label);
+        updateStatusBar(edFolder ?? sel.label);
+      });
+      return;
+    }
+
+    if (name === termFolder) return;
+    termFolder = name;
+    applyTerminal(name);
+    updateStatusBar(edFolder ?? name);
   });
 }
 
-function handleTerminalChange(terminal: vscode.Terminal): void {
-  let name = terminalFolderMap.get(terminal);
-  if (!name) {
-    const f = detectFolder(terminal);
-    if (f) { name = f.name; terminalFolderMap.set(terminal, name); }
-  }
-  if (!name) { currentTerminalFolder = undefined; clearTerminalColor(); return; }
-  if (name === currentTerminalFolder) return;
-  currentTerminalFolder = name;
-  applyTerminalColor(name);
-  updateStatusBar(currentEditorFolder || name);
-}
-
-// ── Commands ──────────────────────────────────────────────────────
-function saveColor(folderName: string, color: string, context: vscode.ExtensionContext): void {
-  colorCache[folderName] = color;
-  const fc = whCfg().get<Record<string,string>>('folderColors', {});
-  fc[folderName] = color;
-  whCfg().update('folderColors', fc, W);
-  writeAllColors(getColor(currentEditorFolder) || color, getColor(currentTerminalFolder) || color);
+// ── Commands ─────────────────────────────────────────────────────────────────
+function saveColor(folderName: string, color: string, ctx: vscode.ExtensionContext) {
+  cache[folderName] = color;
+  whCfg().update('folderColors', {...whCfg().get('folderColors',{}), [folderName]: color}, W);
+  applyColors(getColor(edFolder) ?? color, getColor(termFolder) ?? color);
   updateStatusBar(folderName);
-  buildStatusBar(context);
-  vscode.window.showInformationMessage('Color assigned to "' + folderName + '"!');
+  buildStatusBar(ctx);
+  vscode.window.showInformationMessage(`Color assigned to "${folderName}"!`);
 }
 
-function assignColor(context: vscode.ExtensionContext): void {
+function assignColor(ctx: vscode.ExtensionContext) {
   const editor = vscode.window.activeTextEditor;
   if (!editor) { vscode.window.showWarningMessage('No active file open.'); return; }
   const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
@@ -166,190 +163,182 @@ function assignColor(context: vscode.ExtensionContext): void {
     {label:'Red',color:'#c0392b'},{label:'Blue',color:'#2980b9'},{label:'Green',color:'#27ae60'},
     {label:'Purple',color:'#8e44ad'},{label:'Orange',color:'#d35400'},{label:'Teal',color:'#16a085'},
     {label:'Yellow',color:'#f39c12'},{label:'Dark Blue',color:'#2c3e50'},{label:'Pink',color:'#e91e8c'},
-    {label:'Custom hex...', color:'custom'},
+    {label:'Custom hex…',color:'custom'},
   ];
-  vscode.window.showQuickPick(presets, {placeHolder:'Color for "'+folder.name+'"'}).then(sel => {
+  vscode.window.showQuickPick(presets, {placeHolder:`Color for "${folder.name}"`}).then(sel => {
     if (!sel) return;
     if (sel.color === 'custom') {
-      vscode.window.showInputBox({
-        prompt: 'Hex color (e.g. #ff5733)',
-        validateInput: v => /^#[0-9A-Fa-f]{6}$/.test(v) ? null : 'Invalid hex',
-      }).then(v => { if (v) saveColor(folder.name, v, context); });
+      vscode.window.showInputBox({prompt:'Hex color e.g. #ff5733', validateInput: v => /^#[0-9A-Fa-f]{6}$/.test(v) ? null : 'Invalid hex'})
+        .then(v => { if (v) saveColor(folder.name, v, ctx); });
     } else {
-      saveColor(folder.name, sel.color, context);
+      saveColor(folder.name, sel.color, ctx);
     }
   });
 }
 
-function showFolderPicker(context: vscode.ExtensionContext): void {
-  const fs = folders();
+function showFolderPicker(ctx: vscode.ExtensionContext) {
+  const fs = wsFolders();
   if (!fs.length) { vscode.window.showWarningMessage('No workspace folders found.'); return; }
-  const slotMap = context.workspaceState.get<Record<number,string>>('slotMap', {});
+  const slotMap = ctx.workspaceState.get<Record<number,string>>('slotMap', {});
   const items = fs.map((f, i) => {
-    const slot      = Object.keys(slotMap).find(k => slotMap[+k] === f.name) || String(i+1);
-    const color     = getColor(f.name);
-    const active    = f.name === currentEditorFolder;
-    const activeTerm = f.name === currentTerminalFolder;
-    const badges    = [active && '$(file-code) editor', activeTerm && '$(terminal) terminal'].filter(Boolean).join('  ');
+    const slot  = Object.keys(slotMap).find(k => slotMap[+k] === f.name) ?? String(i+1);
+    const color = getColor(f.name);
+    const isEd  = f.name === edFolder, isTerm = f.name === termFolder;
+    const badge = [isEd && '$(file-code) editor', isTerm && '$(terminal) terminal'].filter(Boolean).join('  ');
     return {
-      label:       (active ? '$(circle-filled) ' : '$(circle-outline) ') + f.name,
-      description: color ? color + (badges ? '   '+badges : '') : '(no color assigned)',
-      detail:      '$(key-mod) Ctrl+Alt+'+slot+'   $(paintcan) Click to switch',
+      label:       `${isEd ? '$(circle-filled)' : '$(circle-outline)'} ${f.name}`,
+      description: color ? `${color}${badge ? `   ${badge}` : ''}` : '(no color)',
+      detail:      `$(key-mod) Ctrl+Alt+${slot}   $(paintcan) Click to switch`,
       folderName:  f.name,
     };
   });
   vscode.window.showQuickPick([
     ...items,
-    { label: '', kind: vscode.QuickPickItemKind.Separator, folderName: '' },
-    { label:'$(paintcan) Assign color to current folder', description:'Color picker for the active folder', folderName:'__assignColor__' },
-    { label:'$(question) How to use WorkspaceHue',        description:'',                                   folderName:'__help__' },
+    {label:'', kind:vscode.QuickPickItemKind.Separator, folderName:''},
+    {label:'$(paintcan) Assign color to current folder', description:'', folderName:'__color__'},
+    {label:'$(question) How to use WorkspaceHue',        description:'', folderName:'__help__'},
   ], {
-    placeHolder: 'WorkspaceHue — '+fs.length+' folders  •  editor: '+(currentEditorFolder||'none')+'  •  terminal: '+(currentTerminalFolder||'none'),
+    placeHolder: `WorkspaceHue — ${fs.length} folders  •  editor: ${edFolder??'none'}  •  terminal: ${termFolder??'none'}`,
     matchOnDescription: true,
   }).then(sel => {
     if (!sel) return;
-    if (sel.folderName === '__assignColor__') { assignColor(context); return; }
-    if (sel.folderName === '__help__') { showHelp(); return; }
+    if (sel.folderName === '__color__') { assignColor(ctx); return; }
+    if (sel.folderName === '__help__')  { showHelp(); return; }
     const i = fs.findIndex(f => f.name === sel.folderName);
-    switchToFolder(+(Object.keys(slotMap).find(k => slotMap[+k] === sel.folderName) || i+1), context);
+    switchToFolder(+(Object.keys(slotMap).find(k => slotMap[+k] === sel.folderName) ?? i+1), ctx);
   });
 }
 
-function showHelp(): void {
+function showHelp() {
   vscode.window.showInformationMessage([
-    'WorkspaceHue — How it works', '',
+    'WorkspaceHue — How it works','',
     '📄 EDITOR COLOR  →  title bar, activity bar, status bar',
-    '   Changes when you open a file in a different folder.', '',
+    '   Changes when you open a file in a different folder.','',
     '⌨  TERMINAL COLOR  →  terminal panel background',
-    '   Changes when you click a different terminal tab.', '',
+    '   Changes when you click a different terminal tab.','',
     '🎨 ASSIGN A COLOR',
     '   Open a file in the target folder, then run:',
-    '   WorkspaceHue: Assign Color to Current Folder', '',
-    '⚡ QUICK SWITCH',
-    '   Ctrl+Alt+1 / 2 / 3 to jump between folders.',
+    '   WorkspaceHue: Assign Color to Current Folder','',
+    '⚡ QUICK SWITCH  →  Ctrl+Alt+1 / 2 / 3',
   ].join('\n'), {modal:true}, 'Assign Color Now', 'Open Keyboard Shortcuts')
   .then(c => {
-    if (c === 'Assign Color Now')       vscode.commands.executeCommand('workspaceHue.assignColor');
-    if (c === 'Open Keyboard Shortcuts') vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', 'workspaceHue');
+    if (c === 'Assign Color Now')        vscode.commands.executeCommand('workspaceHue.assignColor');
+    if (c === 'Open Keyboard Shortcuts') vscode.commands.executeCommand('workbench.action.openGlobalKeybindings','workspaceHue');
   });
 }
 
-function switchToFolder(slotIndex: number, context: vscode.ExtensionContext): void {
-  const fs = folders();
+function switchToFolder(slot: number, ctx: vscode.ExtensionContext) {
+  const fs = wsFolders();
   if (!fs.length) { vscode.window.showWarningMessage('No workspace folders found.'); return; }
-  const slotMap = context.workspaceState.get<Record<number,string>>('slotMap', {});
-  const name = slotMap[slotIndex] || (fs[slotIndex-1] && fs[slotIndex-1].name);
-  if (!name) { vscode.window.showWarningMessage('No folder assigned to slot '+slotIndex+'.'); return; }
+  const slotMap = ctx.workspaceState.get<Record<number,string>>('slotMap', {});
+  const name   = slotMap[slot] ?? fs[slot-1]?.name;
+  if (!name) { vscode.window.showWarningMessage(`No folder assigned to slot ${slot}.`); return; }
   const target = fs.find(f => f.name === name);
-  if (!target) { vscode.window.showWarningMessage('Folder "'+name+'" not found.'); return; }
-  const lastFile = context.workspaceState.get<Record<string,string>>('lastFile', {})[name];
-  if (lastFile) {
-    vscode.workspace.openTextDocument(vscode.Uri.file(lastFile))
-      .then(doc => vscode.window.showTextDocument(doc))
-      .then(() => vscode.window.showInformationMessage('Switched to '+name));
-  } else {
-    vscode.commands.executeCommand('revealInExplorer', target.uri);
-    vscode.window.showInformationMessage('Switched to '+name);
-  }
+  if (!target) { vscode.window.showWarningMessage(`Folder "${name}" not found.`); return; }
+  const lastFile = ctx.workspaceState.get<Record<string,string>>('lastFile',{})[name];
+  (lastFile
+    ? vscode.workspace.openTextDocument(vscode.Uri.file(lastFile)).then(d => vscode.window.showTextDocument(d))
+    : Promise.resolve(vscode.commands.executeCommand('revealInExplorer', target.uri))
+  ).then(() => vscode.window.showInformationMessage(`Switched to ${name}`));
 }
 
-function autoAssignColors(context: vscode.ExtensionContext): void {
-  const fs = folders(); if (!fs.length) return;
+function autoAssignColors() {
+  const fs = wsFolders(); if (!fs.length) return;
   const config = whCfg(), colors = config.get<Record<string,string>>('folderColors', {});
   let updated = false;
-  fs.forEach((f, i) => { if (!colors[f.name]) { colors[f.name] = DEFAULT_COLORS[i % DEFAULT_COLORS.length]; updated = true; } });
-  Object.assign(colorCache, colors);
-  if (updated) {
-    config.update('folderColors', colors, W);
-    vscode.window.showInformationMessage('WorkspaceHue: Colors auto-assigned to '+fs.length+' folders!', 'How to use', 'Switch Folder')
-      .then(c => {
-        if (c === 'How to use')    showHelp();
-        if (c === 'Switch Folder') vscode.commands.executeCommand('workspaceHue.showFolderPicker');
-      });
-  }
+  fs.forEach((f,i) => { if (!colors[f.name]) { colors[f.name] = DEFAULT_COLORS[i%DEFAULT_COLORS.length]; updated = true; }});
+  Object.assign(cache, colors);
+  if (!updated) return;
+  config.update('folderColors', colors, W);
+  vscode.window.showInformationMessage(`WorkspaceHue: Colors auto-assigned to ${fs.length} folders!`, 'How to use', 'Switch Folder')
+    .then(c => {
+      if (c === 'How to use')    showHelp();
+      if (c === 'Switch Folder') vscode.commands.executeCommand('workspaceHue.showFolderPicker');
+    });
 }
 
-function resetColors(): void {
+function resetColors() {
   vscode.window.showWarningMessage('Reset all folder colors?', {modal:true}, 'Yes, Reset').then(c => {
     if (c !== 'Yes, Reset') return;
     whCfg().update('folderColors', {}, W);
     wbCfg().update('colorCustomizations', {}, W);
-    Object.keys(colorCache).forEach(k => delete colorCache[k]);
-    currentEditorFolder = currentTerminalFolder = undefined;
-    statusBarItem.hide();
+    Object.keys(cache).forEach(k => delete cache[k]);
+    edFolder = termFolder = undefined;
+    sbMain.hide();
     vscode.window.showInformationMessage('All colors reset.');
   });
 }
 
-function showStatus(): void {
-  const fs = folders(), colors = whCfg().get<Record<string,string>>('folderColors', {});
+function showStatus() {
+  const fs = wsFolders(), colors = whCfg().get<Record<string,string>>('folderColors',{});
   if (!fs.length) { vscode.window.showInformationMessage('No workspace folders.'); return; }
-  vscode.window.showInformationMessage(fs.map(f => f.name+': '+(colors[f.name]||'(none)')).join('\n'), {modal:true});
+  vscode.window.showInformationMessage(fs.map(f => `${f.name}: ${colors[f.name]??'(none)'}`).join('\n'), {modal:true});
 }
 
-function assignShortcut(context: vscode.ExtensionContext): void {
-  const fs = folders(); if (!fs.length) { vscode.window.showWarningMessage('No workspace folders.'); return; }
-  const slotMap = context.workspaceState.get<Record<number,string>>('slotMap', {});
+function assignShortcut(ctx: vscode.ExtensionContext) {
+  const fs = wsFolders(); if (!fs.length) { vscode.window.showWarningMessage('No workspace folders.'); return; }
+  const slotMap = ctx.workspaceState.get<Record<number,string>>('slotMap', {});
   vscode.window.showQuickPick(
-    [1,2,3,4,5].map(n => ({
-      label: 'Slot '+n+' — '+KEYBINDINGS[n],
-      description: 'Currently: '+(slotMap[n]||(fs[n-1]&&fs[n-1].name)||'empty'),
-      slot: n,
-    })),
+    [1,2,3,4,5].map(n => ({label:`Slot ${n} — ${KEYBINDINGS[n]}`, description:`Currently: ${slotMap[n]??fs[n-1]?.name??'empty'}`, slot:n})),
     {placeHolder:'Which slot to reassign?'}
   ).then(s => {
     if (!s) return;
     vscode.window.showQuickPick(fs.map(f => ({label:f.name})), {placeHolder:'Assign to folder:'}).then(f => {
       if (!f) return;
-      slotMap[s.slot] = f.label;
-      context.workspaceState.update('slotMap', slotMap);
-      vscode.window.showInformationMessage(KEYBINDINGS[s.slot]+' assigned to "'+f.label+'"');
-      buildStatusBar(context);
+      ctx.workspaceState.update('slotMap', {...slotMap, [s.slot]: f.label});
+      vscode.window.showInformationMessage(`${KEYBINDINGS[s.slot]} assigned to "${f.label}"`);
+      buildStatusBar(ctx);
     });
   });
 }
 
-function showShortcuts(context: vscode.ExtensionContext): void {
-  const fs = folders(), slotMap = context.workspaceState.get<Record<number,string>>('slotMap', {});
+function showShortcuts(ctx: vscode.ExtensionContext) {
+  const fs = wsFolders(), slotMap = ctx.workspaceState.get<Record<number,string>>('slotMap',{});
   vscode.window.showInformationMessage(
-    [1,2,3,4,5].map(i => KEYBINDINGS[i]+'  ->  '+(slotMap[i]||(fs[i-1]&&fs[i-1].name)||'(not set)')).join('\n'),
+    [1,2,3,4,5].map(i => `${KEYBINDINGS[i]}  ->  ${slotMap[i]??fs[i-1]?.name??'(not set)'}`).join('\n'),
     {modal:true}
   );
 }
 
-// ── Activate / Deactivate ─────────────────────────────────────────
-export function activate(context: vscode.ExtensionContext): void {
-  const reg = (cmd: string, fn: () => void) =>
-    context.subscriptions.push(vscode.commands.registerCommand(cmd, fn));
+// ── Activate / Deactivate ─────────────────────────────────────────────────────
+export function activate(ctx: vscode.ExtensionContext) {
+  const reg = (cmd: string, fn: ()=>void) => ctx.subscriptions.push(vscode.commands.registerCommand(cmd, fn));
 
-  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
-  statusBarItem.command = 'workspaceHue.assignColor';
-  statusBarItem.tooltip = 'Click to assign a color to this folder';
-  context.subscriptions.push(statusBarItem);
+  sbMain = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
+  sbMain.command = 'workspaceHue.assignColor';
+  sbMain.tooltip = 'Click to assign a color to this folder';
+  ctx.subscriptions.push(sbMain);
 
-  context.subscriptions.push(
-    vscode.window.onDidChangeActiveTextEditor(e => { if (e) handleEditorChange(e, context); }),
-    vscode.window.onDidOpenTerminal(t => { const f = detectFolder(t); if (f) terminalFolderMap.set(t, f.name); }),
-    vscode.window.onDidCloseTerminal(t => terminalFolderMap.delete(t)),
-    vscode.window.onDidChangeActiveTerminal(t => { if (t) handleTerminalChange(t); }),
+  ctx.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(e => { if (e) onEditorChange(e, ctx); }),
+    vscode.window.onDidOpenTerminal(t => {
+      const f = detectFolder(t); if (!f) return;
+      tmap.set(t, f.name);
+      t.processId.then(pid => { if (pid != null) tmap.set(pid, f.name); });
+    }),
+    vscode.window.onDidCloseTerminal(t => {
+      tmap.delete(t);
+      t.processId.then(pid => { if (pid != null) tmap.delete(pid); });
+    }),
+    vscode.window.onDidChangeActiveTerminal(t => { if (t) onTerminalChange(t, ctx); }),
   );
 
-  reg('workspaceHue.showFolderPicker',       () => showFolderPicker(context));
-  reg('workspaceHue.showHelp',               () => showHelp());
-  reg('workspaceHue.assignColor',            () => assignColor(context));
-  reg('workspaceHue.resetColors',            () => resetColors());
-  reg('workspaceHue.showStatus',             () => showStatus());
-  reg('workspaceHue.assignShortcut',         () => assignShortcut(context));
-  reg('workspaceHue.showShortcuts',          () => showShortcuts(context));
-  reg('workspaceHue.openKeyboardShortcuts',  () => vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', 'workspaceHue'));
-  for (let i = 1; i <= 5; i++) reg('workspaceHue.switchToFolder'+i, (idx => () => switchToFolder(idx, context))(i));
+  reg('workspaceHue.showFolderPicker',      () => showFolderPicker(ctx));
+  reg('workspaceHue.showHelp',              () => showHelp());
+  reg('workspaceHue.assignColor',           () => assignColor(ctx));
+  reg('workspaceHue.resetColors',           () => resetColors());
+  reg('workspaceHue.showStatus',            () => showStatus());
+  reg('workspaceHue.assignShortcut',        () => assignShortcut(ctx));
+  reg('workspaceHue.showShortcuts',         () => showShortcuts(ctx));
+  reg('workspaceHue.openKeyboardShortcuts', () => vscode.commands.executeCommand('workbench.action.openGlobalKeybindings','workspaceHue'));
+  for (let i = 1; i <= 5; i++) reg(`workspaceHue.switchToFolder${i}`, (n => () => switchToFolder(n, ctx))(i));
 
-  autoAssignColors(context);
-  buildStatusBar(context);
-  if (vscode.window.activeTextEditor) handleEditorChange(vscode.window.activeTextEditor, context);
+  autoAssignColors();
+  buildStatusBar(ctx);
+  if (vscode.window.activeTextEditor) onEditorChange(vscode.window.activeTextEditor, ctx);
 }
 
-export function deactivate(): void {
-  statusBarItem   && statusBarItem.dispose();
-  folderStatusItem && folderStatusItem.dispose();
+export function deactivate() {
+  sbMain?.dispose();
+  sbFolder?.dispose();
 }
