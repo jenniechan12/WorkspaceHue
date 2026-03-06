@@ -1,0 +1,140 @@
+{
+  "name": "workspace-hue",
+  "publisher": "devnull",
+  "displayName": "WorkspaceHue",
+  "description": "Color your VS Code workspace by folder \u2014 editor and terminal themed independently",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Themes",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "workspaceHue.showFolderPicker",
+        "title": "WorkspaceHue: Switch Folder"
+      },
+      {
+        "command": "workspaceHue.assignColor",
+        "title": "WorkspaceHue: Assign Color to Current Folder"
+      },
+      {
+        "command": "workspaceHue.resetColors",
+        "title": "WorkspaceHue: Reset All Folder Colors"
+      },
+      {
+        "command": "workspaceHue.showStatus",
+        "title": "WorkspaceHue: Show Current Folder Colors"
+      },
+      {
+        "command": "workspaceHue.switchToFolder1",
+        "title": "WorkspaceHue: Switch to Folder 1"
+      },
+      {
+        "command": "workspaceHue.switchToFolder2",
+        "title": "WorkspaceHue: Switch to Folder 2"
+      },
+      {
+        "command": "workspaceHue.switchToFolder3",
+        "title": "WorkspaceHue: Switch to Folder 3"
+      },
+      {
+        "command": "workspaceHue.switchToFolder4",
+        "title": "WorkspaceHue: Switch to Folder 4"
+      },
+      {
+        "command": "workspaceHue.switchToFolder5",
+        "title": "WorkspaceHue: Switch to Folder 5"
+      },
+      {
+        "command": "workspaceHue.assignShortcut",
+        "title": "WorkspaceHue: Assign Shortcut to Folder"
+      },
+      {
+        "command": "workspaceHue.showShortcuts",
+        "title": "WorkspaceHue: Show All Shortcuts"
+      },
+      {
+        "command": "workspaceHue.openKeyboardShortcuts",
+        "title": "WorkspaceHue: Open Keyboard Shortcuts Editor"
+      },
+      {
+        "command": "workspaceHue.showHelp",
+        "title": "WorkspaceHue: Show Help"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "workspaceHue.switchToFolder1",
+        "key": "ctrl+alt+1",
+        "mac": "cmd+alt+1"
+      },
+      {
+        "command": "workspaceHue.switchToFolder2",
+        "key": "ctrl+alt+2",
+        "mac": "cmd+alt+2"
+      },
+      {
+        "command": "workspaceHue.switchToFolder3",
+        "key": "ctrl+alt+3",
+        "mac": "cmd+alt+3"
+      },
+      {
+        "command": "workspaceHue.switchToFolder4",
+        "key": "ctrl+alt+4",
+        "mac": "cmd+alt+4"
+      },
+      {
+        "command": "workspaceHue.switchToFolder5",
+        "key": "ctrl+alt+5",
+        "mac": "cmd+alt+5"
+      }
+    ],
+    "configuration": {
+      "title": "WorkspaceHue",
+      "properties": {
+        "workspaceHue.folderColors": {
+          "type": "object",
+          "default": {},
+          "description": "Map of folder names to hex color values"
+        },
+        "workspaceHue.affectTitleBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Color the title bar based on active file folder"
+        },
+        "workspaceHue.affectActivityBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Color the activity bar based on active file folder"
+        },
+        "workspaceHue.affectStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Color the status bar based on active file folder"
+        },
+        "workspaceHue.affectTerminal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Color the terminal panel based on active terminal folder"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0"
+  }
+}
